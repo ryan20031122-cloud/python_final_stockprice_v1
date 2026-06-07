@@ -3,46 +3,94 @@ import pandas as pd
 import plotly.express as px
 from sqlalchemy import create_engine
 
-from config.settings import get_database_url, TICKERS, DEFAULT_PERIOD
-from utils.live_data import fetch_stock_prices
+from config.settings import get_database_url
+from utils.live_data import fetch_live_stock_data
+
 
 st.set_page_config(page_title="Stock Comparison", layout="wide")
-st.title("Stock Comparison｜科技股報酬率與波動率比較")
+
+st.title("Stock Comparison")
+st.write("比較主要科技股的報酬率與波動率")
 
 
 @st.cache_data(ttl=3600)
-def load_data() -> tuple[pd.DataFrame, str]:
+def load_data():
     database_url = get_database_url()
+
     if database_url:
         try:
             engine = create_engine(database_url, pool_pre_ping=True)
-            df = pd.read_sql("SELECT * FROM stock_prices ORDER BY date ASC", engine)
+
+            query = """
+            SELECT
+                date,
+                ticker,
+                close,
+                daily_return,
+                volatility_7
+            FROM stock_prices
+            ORDER BY date ASC
+            """
+
+            df = pd.read_sql(query, engine)
+
             if not df.empty:
                 df["date"] = pd.to_datetime(df["date"])
                 return df, "cloud_database"
+
         except Exception:
             pass
-    return fetch_stock_prices(TICKERS, DEFAULT_PERIOD), "yahoo_finance_live"
+
+    df = fetch_live_stock_data()
+
+    if not df.empty:
+        return df, "stooq_live_data"
+
+    return pd.DataFrame(), "no_data"
 
 
-df, source = load_data()
-if df.empty:
+df, mode = load_data()
+
+if mode == "cloud_database":
+    st.success("目前使用雲端資料庫中的真實股價資料。")
+elif mode == "stooq_live_data":
+    st.success("目前使用 Stooq 公開 CSV 來源的真實股價資料。")
+else:
     st.error("目前無法取得股價資料。")
     st.stop()
 
-source_text = "雲端 PostgreSQL / Supabase" if source == "cloud_database" else "Yahoo Finance 即時抓取"
-st.success(f"目前資料來源：{source_text}")
+summary = (
+    df.groupby("ticker")
+    .agg(
+        latest_close=("close", "last"),
+        average_daily_return=("daily_return", "mean"),
+        average_volatility=("volatility_7", "mean")
+    )
+    .reset_index()
+)
 
-df["date"] = pd.to_datetime(df["date"])
-selected = st.multiselect("Select tickers", sorted(df["ticker"].unique()), default=sorted(df["ticker"].unique()))
-filtered = df[df["ticker"].isin(selected)].copy()
-filtered["cumulative_return"] = filtered.groupby("ticker")["daily_return"].transform(lambda s: (1 + s.fillna(0)).cumprod() - 1)
+st.subheader("各科技股平均每日報酬率")
 
-fig = px.line(filtered, x="date", y="cumulative_return", color="ticker", title="Cumulative Return Comparison")
-st.plotly_chart(fig, use_container_width=True)
+fig_return = px.bar(
+    summary,
+    x="ticker",
+    y="average_daily_return",
+    title="Average Daily Return by Stock"
+)
 
-latest = filtered.sort_values("date").groupby("ticker").tail(1)
-fig2 = px.bar(latest, x="ticker", y="volatility_7", title="Latest 7-Day Volatility")
-st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig_return, use_container_width=True)
 
-st.dataframe(latest[["ticker", "date", "close", "daily_return", "volatility_7", "volume"]], use_container_width=True)
+st.subheader("各科技股平均 7 日波動率")
+
+fig_vol = px.bar(
+    summary,
+    x="ticker",
+    y="average_volatility",
+    title="Average 7-Day Volatility by Stock"
+)
+
+st.plotly_chart(fig_vol, use_container_width=True)
+
+st.subheader("比較資料表")
+
+st.dataframe(summary, use_container_width=True)
