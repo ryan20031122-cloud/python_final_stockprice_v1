@@ -99,3 +99,15 @@ def fetch_live_stock_data(
     result = result.sort_values(["ticker", "date"])
 
     return result
+def fallback_news_sentiment():
+    import pandas as pd
+
+    return pd.DataFrame({
+        "sentiment": ["Positive", "Neutral", "Negative"],
+        "count": [18, 10, 7],
+        "description": [
+            "AI demand, strong earnings, and technology growth news",
+            "General market updates and mixed economic signals",
+            "Interest rate concerns, geopolitical risks, and weak outlook"
+        ]
+    })
