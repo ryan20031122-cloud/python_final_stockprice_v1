@@ -1,84 +1,101 @@
-from __future__ import annotations
-
-from datetime import datetime, timezone
 import pandas as pd
-import yfinance as yf
+import requests
+from io import StringIO
 
-DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "TSLA"]
+
+TICKER_MAP = {
+    "AAPL": "aapl.us",
+    "MSFT": "msft.us",
+    "NVDA": "nvda.us",
+    "GOOGL": "googl.us",
+    "TSLA": "tsla.us",
+}
 
 
-def fetch_stock_prices(tickers: list[str] | None = None, period: str = "1y") -> pd.DataFrame:
-    """Fetch real stock price data from Yahoo Finance through yfinance.
-
-    This function is used as the app's real-data fallback when cloud database
-    data is not available yet. It returns the same core columns as stock_prices.
+def fetch_stooq_stock(symbol: str) -> pd.DataFrame:
     """
-    tickers = tickers or DEFAULT_TICKERS
-    frames: list[pd.DataFrame] = []
+    從 Stooq CSV 取得真實歷史股價資料。
+    """
+    stooq_symbol = TICKER_MAP.get(symbol, symbol.lower())
+
+    url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.get(url, headers=headers, timeout=20)
+    response.raise_for_status()
+
+    text = response.text.strip()
+
+    if not text or "Date,Open,High,Low,Close,Volume" not in text:
+        return pd.DataFrame()
+
+    df = pd.read_csv(StringIO(text))
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df.columns = [col.lower() for col in df.columns]
+
+    df["date"] = pd.to_datetime(df["date"])
+    df["ticker"] = symbol
+
+    df = df.sort_values("date")
+
+    df["daily_return"] = df["close"].pct_change()
+    df["ma_7"] = df["close"].rolling(window=7).mean()
+    df["ma_30"] = df["close"].rolling(window=30).mean()
+    df["volatility_7"] = df["daily_return"].rolling(window=7).std()
+
+    return df[
+        [
+            "date",
+            "ticker",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "daily_return",
+            "ma_7",
+            "ma_30",
+            "volatility_7",
+        ]
+    ]
+
+
+def fetch_live_stock_data(
+    tickers=None,
+    period_days: int = 365
+) -> pd.DataFrame:
+    """
+    抓取多檔股票真實歷史資料。
+    預設抓最近約一年資料。
+    """
+    if tickers is None:
+        tickers = ["AAPL", "MSFT", "NVDA", "GOOGL", "TSLA"]
+
+    frames = []
 
     for ticker in tickers:
-        data = yf.download(ticker, period=period, auto_adjust=False, progress=False, threads=False)
-        if data is None or data.empty:
+        try:
+            df = fetch_stooq_stock(ticker)
+
+            if not df.empty:
+                latest_date = df["date"].max()
+                start_date = latest_date - pd.Timedelta(days=period_days)
+                df = df[df["date"] >= start_date]
+                frames.append(df)
+
+        except Exception:
             continue
-
-        # yfinance can return MultiIndex columns in some versions.
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = [col[0] for col in data.columns]
-
-        df = data.reset_index()
-        df.columns = [str(col).lower().replace(" ", "_") for col in df.columns]
-        df["ticker"] = ticker
-
-        rename_map = {
-            "date": "date",
-            "open": "open",
-            "high": "high",
-            "low": "low",
-            "close": "close",
-            "adj_close": "adj_close",
-            "volume": "volume",
-        }
-        df = df.rename(columns=rename_map)
-        keep = ["ticker", "date", "open", "high", "low", "close", "volume"]
-        df = df[[col for col in keep if col in df.columns]].copy()
-        frames.append(df)
 
     if not frames:
         return pd.DataFrame()
 
     result = pd.concat(frames, ignore_index=True)
-    result["date"] = pd.to_datetime(result["date"])
     result = result.sort_values(["ticker", "date"])
-    result["daily_return"] = result.groupby("ticker")["close"].pct_change()
-    result["ma_7"] = result.groupby("ticker")["close"].transform(lambda s: s.rolling(7, min_periods=1).mean())
-    result["ma_30"] = result.groupby("ticker")["close"].transform(lambda s: s.rolling(30, min_periods=1).mean())
-    result["volatility_7"] = result.groupby("ticker")["daily_return"].transform(lambda s: s.rolling(7, min_periods=2).std())
-    result["created_at"] = datetime.now(timezone.utc)
-    return result.dropna(subset=["ticker", "date", "close"])
 
-
-def fallback_news_sentiment() -> pd.DataFrame:
-    """Small real-world context table for dashboard display when News API is not connected."""
-    return pd.DataFrame([
-        {
-            "published_at": "Recent",
-            "source": "Market context",
-            "sentiment": "positive",
-            "sentiment_score": 0.55,
-            "title": "AI infrastructure demand continues to support semiconductor and cloud-related stocks.",
-        },
-        {
-            "published_at": "Recent",
-            "source": "International event context",
-            "sentiment": "neutral",
-            "sentiment_score": 0.02,
-            "title": "Investors monitor interest-rate expectations, inflation data, and global trade policy.",
-        },
-        {
-            "published_at": "Recent",
-            "source": "Risk context",
-            "sentiment": "negative",
-            "sentiment_score": -0.35,
-            "title": "Technology stocks may become volatile when earnings, export controls, or geopolitical risks change.",
-        },
-    ])
+    return result
