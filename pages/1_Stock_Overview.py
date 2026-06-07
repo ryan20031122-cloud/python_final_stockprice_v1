@@ -138,3 +138,4 @@ st.plotly_chart(fig_vol, use_container_width=True)
 
 st.subheader("原始資料表")
 
+st.dataframe(filtered_df, use_container_width=True)
